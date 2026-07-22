@@ -85,9 +85,27 @@ Tool-level errors ride back as `isError: true` responses, not JSON-RPC errors �
 JSON-RPC `error` objects are reserved for transport/method faults, matching the
 MCP convention.
 
+## Transports
+
+Two transports share one dispatch core (`handleMessage`):
+
+- **stdio** (`srv.run()`) — line-delimited JSON-RPC over stdin/stdout, for local
+  MCP clients. No networking dependency.
+- **HTTP** (`import aowlmcp/http`; `srv.serveHttp(port)`) — the modern MCP
+  Streamable-HTTP transport, for *remote* clients. A client POSTs a JSON-RPC
+  message to `/mcp` and gets the response as `application/json` (a notification
+  gets `202`). Served over the [aoughwl net stack](https://github.com/aoughwl/serve).
+  This transport is opt-in: `import aowlmcp` alone pulls no networking.
+
+```sh
+./build.sh examples/http_server.nim && ./bin/http_server 8130 &
+curl -s localhost:8130/mcp -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
 ## Examples
 
-- **`examples/echo_server.nim`** — `greet` and `add`; the minimal shape.
+- **`examples/echo_server.nim`** — stdio; `greet` and `add`; the minimal shape.
+- **`examples/http_server.nim`** — the same tools over HTTP (`serveHttp`).
 - **`examples/nimtools_server.nim`** — a real toolchain front-end: `compile`
   (runs Nimony/Nim, returns structured diagnostics) and `nif_outline` (lists the
   top-level nodes of a NIF artifact). This is the nimony-native cousin of the
@@ -111,10 +129,10 @@ appear in Claude Code with no manual build step.
 ## Layout
 
 ```
-src/aowlmcp.nim          umbrella module (import this)
-src/aowlmcp/json.nim     JsonValue: parser, serializer, accessors, builders
-src/aowlmcp/server.nim   Server: registry, JSON-RPC dispatch, stdio run loop
-examples/                echo_server, nimtools_server
+src/aowlmcp.nim          umbrella module (import this); re-exports aowljson
+src/aowlmcp/server.nim   Server: registry, JSON-RPC dispatch, handleMessage, stdio run
+src/aowlmcp/http.nim     opt-in HTTP (Streamable-HTTP) transport over the net stack
+examples/                echo_server, http_server, nimtools_server
 tests/tjson.nim          JSON unit tests
 tests/e2e.sh             build + drive servers over stdio, assert responses
 ```

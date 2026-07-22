@@ -152,26 +152,33 @@ proc dispatch(srv: Server; req: JsonValue): JsonValue =
       return makeError(id, -32601, "method not found: " & meth)
     return nil
 
-proc emit(resp: JsonValue) =
-  writeLine(stdout, $resp)
-  flushFile(stdout)
+proc handleMessage*(srv: Server; msg: string): string =
+  ## Process one incoming JSON-RPC message (a single object, or a batch array)
+  ## and return the response text to send back, or "" when there is nothing to
+  ## reply with (a notification, or a batch of only notifications). This is the
+  ## transport-agnostic core: both the stdio `run` loop and the HTTP transport
+  ## (aowlmcp/http) feed raw message text through here.
+  var err = ""
+  let req = parseJson(msg, err)
+  if err.len > 0:
+    return $makeError(newJNull(), -32700, "parse error")
+  if req.kind == jnArray:
+    let arr = newJArray()
+    for sub in req:
+      let r = dispatch(srv, sub)
+      if r != nil: arr.add(r)
+    if arr.len == 0: return ""
+    return $arr
+  let resp = dispatch(srv, req)
+  if resp == nil: return ""
+  return $resp
 
 proc run*(srv: Server) =
-  ## Serve MCP over stdin/stdout until EOF.
+  ## Serve MCP over stdin/stdout until EOF (the stdio transport).
   var line = ""
   while readLine(stdin, line):
     if line.len == 0: continue
-    var err = ""
-    let req = parseJson(line, err)
-    if err.len > 0:
-      emit(makeError(newJNull(), -32700, "parse error"))
-      continue
-    if req.kind == jnArray:
-      for sub in req:
-        let r = dispatch(srv, sub)
-        if r != nil: writeLine(stdout, $r)
+    let outp = srv.handleMessage(line)
+    if outp.len > 0:
+      writeLine(stdout, outp)
       flushFile(stdout)
-      continue
-    let resp = dispatch(srv, req)
-    if resp != nil:
-      emit(resp)
