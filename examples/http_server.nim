@@ -31,4 +31,4 @@ srv.registerTool("add", "Add two integers.",
   """{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"]}""",
   add2)
 
-srv.serveHttp(port)
+srv.serveHttpAsync(port)   # single-threaded epoll reactor: many clients, one thread
