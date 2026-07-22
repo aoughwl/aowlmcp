@@ -11,7 +11,7 @@ when defined(nimony):
   {.feature: "lenientnils".}
 
 import std/syncio
-import json
+import aowljson
 
 const ProtocolVersion* = "2024-11-05"
 

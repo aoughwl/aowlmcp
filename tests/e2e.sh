@@ -11,10 +11,6 @@ check() { # <label> <expected-substring> <actual>
   else fail=$((fail+1)); echo "  FAIL: $1"; echo "    want substr: $2"; echo "    got: $3"; fi
 }
 
-echo "== unit: json =="
-"$HOME/nimony/bin/nimony" c -r tests/tjson.nim 2>/dev/null | grep -q "tjson: OK" \
-  && { echo "  ok: tjson"; pass=$((pass+1)); } || { echo "  FAIL: tjson"; fail=$((fail+1)); }
-
 echo "== build servers =="
 ./build.sh examples/echo_server.nim >/dev/null
 ./build.sh examples/nimtools_server.nim >/dev/null
