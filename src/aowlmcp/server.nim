@@ -1,11 +1,20 @@
 ## aowlmcp/server — a Model Context Protocol server over stdio for Nimony.
 ##
 ## Wire protocol (matching the MCP stdio transport): one JSON object per line on
-## stdin, one JSON response per line on stdout, JSON-RPC 2.0 envelopes,
-## `protocolVersion` `2024-11-05`. Tool results are returned as a single text
-## content block whose text is the compact-JSON encoding of the handler's return
-## value; tool-level failures ride back as `isError: true` responses rather than
-## JSON-RPC errors (JSON-RPC errors are reserved for transport/method faults).
+## stdin, one JSON response per line on stdout, JSON-RPC 2.0 envelopes. Tool
+## results are returned as a single text content block whose text is the
+## compact-JSON encoding of the handler's return value; tool-level failures ride
+## back as `isError: true` responses rather than JSON-RPC errors (JSON-RPC errors
+## are reserved for transport/method faults).
+##
+## Dual protocol version. This server speaks BOTH:
+##   * `2026-07-28` — the stateless revision: no `initialize` handshake, per-request
+##     `_meta` carries protocol version / client info / client capabilities, and a
+##     `server/discover` RPC advertises capabilities up front.
+##   * `2024-11-05` — the original stateful handshake (`initialize` /
+##     `notifications/initialized`), kept alive for older clients.
+## The version is negotiated per request from `_meta`; when absent we assume the
+## legacy version so pre-2026 clients keep working unchanged.
 
 when defined(nimony):
   {.feature: "lenientnils".}
@@ -13,41 +22,112 @@ when defined(nimony):
 import std/syncio
 import aowljson
 
-const ProtocolVersion* = "2024-11-05"
+const
+  ProtocolVersionLatest* = "2026-07-28"
+    ## Newest MCP revision this server implements (stateless).
+  ProtocolVersionLegacy* = "2024-11-05"
+    ## Original stateful revision, retained for backwards compatibility.
+  ProtocolVersion* = ProtocolVersionLatest
+    ## The version advertised by default (e.g. `server/discover`, `initialize`
+    ## when the client does not request a specific one).
+  SupportedProtocolVersions* = [ProtocolVersionLatest, ProtocolVersionLegacy]
+
+  # `_meta` keys defined by the 2026-07-28 revision (statelessness SEPs).
+  MetaProtocolVersion* = "io.modelcontextprotocol/protocolVersion"
+  MetaClientInfo* = "io.modelcontextprotocol/clientInfo"
+  MetaClientCapabilities* = "io.modelcontextprotocol/clientCapabilities"
+
+  ListTtlMs* = 60000'i64
+    ## Default `ttlMs` cache hint on `tools/list` (2026-07-28 caching fields).
+
+  TasksExtension* = "io.modelcontextprotocol/tasks"
+    ## Identifier of the official Tasks extension (SEP-2663).
+
+proc isSupportedVersion(v: string): bool =
+  for s in SupportedProtocolVersions:
+    if s == v: return true
+  false
 
 type
   ToolHandler* = proc(args: JsonValue): JsonValue
     ## Receives the `arguments` object of a `tools/call`, returns a structured
     ## result. Return an object containing an `"error"` key to signal failure.
 
+  ToolHandlerMRTR* = proc(args, inputResponses, requestState: JsonValue): JsonValue
+    ## Multi-Round-Trip (2026-07-28) handler. In addition to `arguments` it
+    ## receives the `inputResponses` map and echoed `requestState` from a follow-up
+    ## call. On the first call both are `JNull`; return `newInputRequired(...)` to
+    ## ask the client for input, then complete on the follow-up call.
+
   Tool = object
     name: string
     description: string
     inputSchema: JsonValue
-    handler: ToolHandler
+    handler: ToolHandler          ## simple handler (nil when `mrtr` is set)
+    mrtr: ToolHandlerMRTR         ## MRTR handler (nil when `handler` is set)
+    taskBased: bool               ## return a task handle instead of a direct result
+
+  Task = object
+    id: string
+    status: string                ## "working" | "completed" | "failed" | "cancelled"
+    payload: JsonValue            ## the wrapped tool result once completed
 
   Server* = ref object
     name: string
     version: string
     tools: seq[Tool]
+    tasks: seq[Task]              ## Tasks-extension store (2026-07-28)
+    taskSeq: int
 
 proc newServer*(name: string; version = "0.1.0"): Server =
   ## Create an MCP server that will identify itself as `name`/`version`.
-  Server(name: name, version: version, tools: @[])
+  Server(name: name, version: version, tools: @[], tasks: @[], taskSeq: 0)
+
+proc parseSchema(schemaJson: string): JsonValue =
+  ## Parse a JSON-Schema string; a malformed schema is a programming error, so
+  ## fall back to a permissive object schema rather than aborting registration.
+  var err = ""
+  result = parseJson(schemaJson, err)
+  if err.len > 0:
+    result = newJObject()
+    result["type"] = newJString("object")
 
 proc registerTool*(srv: Server; name, description, schemaJson: string;
                    handler: ToolHandler) =
   ## Register a tool. `schemaJson` is the JSON-Schema string describing the
   ## tool's `arguments` object (e.g. `{"type":"object","properties":{...}}`).
-  var err = ""
-  var schema = parseJson(schemaJson, err)
-  if err.len > 0:
-    # A malformed schema is a programming error; fall back to a permissive one
-    # rather than aborting the whole server at registration time.
-    schema = newJObject()
-    schema["type"] = newJString("object")
   srv.tools.add(Tool(name: name, description: description,
-                     inputSchema: schema, handler: handler))
+                     inputSchema: parseSchema(schemaJson),
+                     handler: handler, mrtr: nil))
+
+proc registerToolMRTR*(srv: Server; name, description, schemaJson: string;
+                       handler: ToolHandlerMRTR) =
+  ## Register a Multi-Round-Trip (2026-07-28) tool. The handler may return
+  ## `newInputRequired(...)` to elicit client input and is re-invoked with the
+  ## client's `inputResponses` and the echoed `requestState`.
+  srv.tools.add(Tool(name: name, description: description,
+                     inputSchema: parseSchema(schemaJson),
+                     handler: nil, mrtr: handler))
+
+proc registerTaskTool*(srv: Server; name, description, schemaJson: string;
+                       handler: ToolHandler) =
+  ## Register a Tasks-extension (2026-07-28) tool. A `tools/call` returns a task
+  ## handle (server-directed); the client then drives `tasks/get` / `tasks/cancel`.
+  ## The handler still runs to completion inline — this server records the result
+  ## against the task id so `tasks/get` can return it — but the surface lets
+  ## async-capable transports poll for long-running work.
+  srv.tools.add(Tool(name: name, description: description,
+                     inputSchema: parseSchema(schemaJson),
+                     handler: handler, mrtr: nil, taskBased: true))
+
+proc newInputRequired*(inputRequests: JsonValue; requestState = ""): JsonValue =
+  ## Build a 2026-07-28 `InputRequiredResult`. `inputRequests` is a map of
+  ## elicitation/sampling requests the client must fulfil; `requestState` is an
+  ## opaque blob the client echoes back verbatim on the follow-up call.
+  result = newJObject()
+  result["resultType"] = newJString("inputRequired")
+  result["inputRequests"] = inputRequests
+  result["requestState"] = newJString(requestState)
 
 # ---------------------------------------------------------------------------
 # JSON-RPC envelopes
@@ -72,16 +152,57 @@ proc makeError(id: JsonValue; code: int64; message: string): JsonValue =
 # method handlers
 # ---------------------------------------------------------------------------
 
-proc handleInitialize(srv: Server; id: JsonValue): JsonValue =
-  let caps = newJObject()
-  caps["tools"] = newJObject()
-  let info = newJObject()
-  info["name"] = newJString(srv.name)
-  info["version"] = newJString(srv.version)
+proc serverInfo(srv: Server): JsonValue =
+  result = newJObject()
+  result["name"] = newJString(srv.name)
+  result["version"] = newJString(srv.version)
+
+proc hasTaskTool(srv: Server): bool =
+  for t in srv.tools:
+    if t.taskBased: return true
+  false
+
+proc capabilities(srv: Server): JsonValue =
+  ## Capabilities advertised in both `initialize` and `server/discover`.
+  result = newJObject()
+  result["tools"] = newJObject()
+  # `extensions` is the 2026-07-28 negotiation map (Tasks, MCP Apps, …). We list
+  # the Tasks extension only when a task tool is registered; harmless for legacy
+  # clients to ignore.
+  let ext = newJObject()
+  if srv.hasTaskTool():
+    ext[TasksExtension] = newJObject()
+  result["extensions"] = ext
+
+proc negotiateInitVersion(requested: string): string =
+  ## Version to echo from the legacy `initialize` handshake: honour the client's
+  ## request when we support it, else default to the LEGACY version — a client
+  ## using `initialize` at all is legacy-style; stateless clients use
+  ## `server/discover` instead.
+  if requested.len > 0 and isSupportedVersion(requested): requested
+  else: ProtocolVersionLegacy
+
+proc handleInitialize(srv: Server; id: JsonValue; params: JsonValue): JsonValue =
+  ## Legacy (`2024-11-05`) stateful handshake. Retained for older clients; the
+  ## 2026-07-28 flow uses `server/discover` instead.
   let res = newJObject()
+  res["protocolVersion"] = newJString(negotiateInitVersion(params{"protocolVersion"}.getStr))
+  res["capabilities"] = srv.capabilities()
+  res["serverInfo"] = srv.serverInfo()
+  return makeResponse(id, res)
+
+proc handleDiscover(srv: Server; id: JsonValue): JsonValue =
+  ## 2026-07-28 stateless discovery: advertise supported protocol versions,
+  ## capabilities (including the extensions map), and server identity. Doubles as
+  ## the stdio backwards-compatibility probe.
+  let versions = newJArray()
+  for v in SupportedProtocolVersions:
+    versions.add(newJString(v))
+  let res = newJObject()
+  res["protocolVersions"] = versions
   res["protocolVersion"] = newJString(ProtocolVersion)
-  res["capabilities"] = caps
-  res["serverInfo"] = info
+  res["capabilities"] = srv.capabilities()
+  res["serverInfo"] = srv.serverInfo()
   return makeResponse(id, res)
 
 proc handleToolsList(srv: Server; id: JsonValue): JsonValue =
@@ -94,11 +215,27 @@ proc handleToolsList(srv: Server; id: JsonValue): JsonValue =
     arr.add(entry)
   let res = newJObject()
   res["tools"] = arr
+  # 2026-07-28 caching hints (SEP): tool lists are stateless and cacheable across
+  # instances. Conservative defaults; legacy clients ignore the extra fields.
+  res["ttlMs"] = newJInt(ListTtlMs)
+  res["cacheScope"] = newJString("public")
   return makeResponse(id, res)
 
 proc findTool(srv: Server; name: string): int =
   for i in 0 ..< srv.tools.len:
     if srv.tools[i].name == name: return i
+  return -1
+
+proc createTask(srv: Server; payload: JsonValue): string =
+  ## Record a completed task and return its server-issued id. State lives in this
+  ## explicit handle, not in a protocol session — the store is per-process.
+  inc srv.taskSeq
+  result = "task-" & $srv.taskSeq
+  srv.tasks.add(Task(id: result, status: "completed", payload: payload))
+
+proc findTask(srv: Server; id: string): int =
+  for i in 0 ..< srv.tasks.len:
+    if srv.tasks[i].id == id: return i
   return -1
 
 proc wrapToolResult(res: JsonValue): JsonValue =
@@ -124,21 +261,98 @@ proc handleToolsCall(srv: Server; id: JsonValue; params: JsonValue): JsonValue =
   var args = params{"arguments"}
   if args.kind != jnObject:
     args = newJObject()
-  let res = srv.tools[idx].handler(args)
-  return makeResponse(id, wrapToolResult(res))
+
+  var res: JsonValue
+  if srv.tools[idx].mrtr != nil:
+    # 2026-07-28 MRTR tool: hand it the follow-up `inputResponses` + echoed
+    # `requestState` (both JNull on the first call).
+    res = srv.tools[idx].mrtr(args, params{"inputResponses"}, params{"requestState"})
+  else:
+    res = srv.tools[idx].handler(args)
+
+  # An InputRequiredResult is itself the JSON-RPC `result` — it is NOT wrapped as
+  # a text content block; the client re-issues the call with the responses.
+  if res.kind == jnObject and res{"resultType"}.getStr == "inputRequired":
+    return makeResponse(id, res)
+
+  let wrapped = wrapToolResult(res)
+  if srv.tools[idx].taskBased:
+    # Tasks extension: return a handle; the result is fetched via `tasks/get`.
+    let tid = srv.createTask(wrapped)
+    let handle = newJObject()
+    handle["taskId"] = newJString(tid)
+    handle["status"] = newJString("completed")
+    return makeResponse(id, handle)
+  return makeResponse(id, wrapped)
+
+proc handleTasksGet(srv: Server; id: JsonValue; params: JsonValue): JsonValue =
+  let tid = params{"taskId"}.getStr
+  let i = srv.findTask(tid)
+  if i < 0:
+    return makeError(id, -32602, "unknown task: " & tid)
+  let res = newJObject()
+  res["taskId"] = newJString(tid)
+  res["status"] = newJString(srv.tasks[i].status)
+  if srv.tasks[i].status == "completed":
+    res["result"] = srv.tasks[i].payload
+  return makeResponse(id, res)
+
+proc handleTasksCancel(srv: Server; id: JsonValue; params: JsonValue): JsonValue =
+  let tid = params{"taskId"}.getStr
+  let i = srv.findTask(tid)
+  if i < 0:
+    return makeError(id, -32602, "unknown task: " & tid)
+  if srv.tasks[i].status == "working":
+    srv.tasks[i].status = "cancelled"
+  let res = newJObject()
+  res["taskId"] = newJString(tid)
+  res["status"] = newJString(srv.tasks[i].status)
+  return makeResponse(id, res)
+
+proc handleTasksUpdate(srv: Server; id: JsonValue; params: JsonValue): JsonValue =
+  ## Accept client→server input for a task (MRTR-over-tasks). This sync server
+  ## completes work inline, so there is nothing to feed a running task; we
+  ## acknowledge with the current status.
+  let tid = params{"taskId"}.getStr
+  let i = srv.findTask(tid)
+  if i < 0:
+    return makeError(id, -32602, "unknown task: " & tid)
+  let res = newJObject()
+  res["taskId"] = newJString(tid)
+  res["status"] = newJString(srv.tasks[i].status)
+  return makeResponse(id, res)
 
 # ---------------------------------------------------------------------------
 # dispatch + run loop
 # ---------------------------------------------------------------------------
+
+proc metaProtocolVersion(req: JsonValue): string =
+  ## The protocol version carried in the 2026-07-28 per-request `_meta` (a member
+  ## of `params`), or "" for legacy requests that omit it. Also tolerate a
+  ## top-level `_meta` placement.
+  result = req{"params"}{"_meta"}{MetaProtocolVersion}.getStr
+  if result.len == 0:
+    result = req{"_meta"}{MetaProtocolVersion}.getStr
 
 proc dispatch(srv: Server; req: JsonValue): JsonValue =
   ## Returns the response object, or nil for notifications (no reply).
   let meth = req{"method"}.getStr
   let hasId = req.hasKey("id")
   let id = req{"id"}   # JNull when absent
+
+  # 2026-07-28: validate the per-request protocol version from `_meta`. Absent
+  # `_meta` => a legacy (2024-11-05) client, which is fine. `server/discover` and
+  # `initialize` self-negotiate, so they are never rejected here.
+  if hasId and meth != "server/discover" and meth != "initialize":
+    let v = req.metaProtocolVersion()
+    if v.len > 0 and not isSupportedVersion(v):
+      return makeError(id, -32602, "unsupported protocol version: " & v)
+
   case meth
+  of "server/discover":
+    return handleDiscover(srv, id)
   of "initialize":
-    return handleInitialize(srv, id)
+    return handleInitialize(srv, id, req{"params"})
   of "notifications/initialized", "initialized":
     return nil
   of "ping":
@@ -147,6 +361,12 @@ proc dispatch(srv: Server; req: JsonValue): JsonValue =
     return handleToolsList(srv, id)
   of "tools/call":
     return handleToolsCall(srv, id, req{"params"})
+  of "tasks/get":
+    return handleTasksGet(srv, id, req{"params"})
+  of "tasks/cancel":
+    return handleTasksCancel(srv, id, req{"params"})
+  of "tasks/update":
+    return handleTasksUpdate(srv, id, req{"params"})
   else:
     if hasId:
       return makeError(id, -32601, "method not found: " & meth)

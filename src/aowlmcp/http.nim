@@ -28,6 +28,11 @@ proc mcpResponse(srv: Server; req: Request; endpoint: string): Response =
   if req.path != endpoint:
     return response(404, "text/plain", "not found")
   if req.meth == "POST":
+    # 2026-07-28 clients send `Mcp-Method` / `Mcp-Name` routing headers so
+    # load balancers can route without inspecting the body. A single-instance
+    # server needs no such routing, so we accept-and-ignore them (the actual
+    # method/name are read from the JSON-RPC body by `handleMessage`). Legacy
+    # clients omit them; both work unchanged.
     let body = srv.handleMessage(req.body)
     if body.len == 0:
       # notification / no reply

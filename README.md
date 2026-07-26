@@ -70,20 +70,37 @@ tool-level failure (the response comes back with `isError: true`).
 
 ## Protocol coverage
 
+aowlmcp speaks **both** protocol versions — the original **`2024-11-05`** and the
+stateless **`2026-07-28`** revision — negotiated per request.
+
 | Method | Behaviour |
 |---|---|
-| `initialize` | Returns `protocolVersion` `2024-11-05`, `capabilities.tools`, `serverInfo`. |
+| `server/discover` | **(2026-07-28)** `protocolVersions`, `capabilities` (incl. `extensions`), `serverInfo`; also the stdio back-compat probe. |
+| `initialize` | **(legacy)** Negotiates `protocolVersion` from the client, else the legacy version. |
 | `notifications/initialized` / `initialized` | Acknowledged with no response. |
 | `ping` | Empty result. |
-| `tools/list` | Every registered tool with its `name`, `description`, `inputSchema`. |
-| `tools/call` | Dispatches to the handler; wraps the result as a text content block. |
+| `tools/list` | Every registered tool (`name`, `description`, `inputSchema`) + `ttlMs`/`cacheScope`. |
+| `tools/call` | Dispatches to the handler; wraps as a text content block, or returns an `InputRequiredResult` (MRTR) / task handle. |
+| `tasks/get` / `tasks/cancel` / `tasks/update` | **(2026-07-28 Tasks extension)** |
 | batch arrays | Each sub-request dispatched; one response line per non-notification. |
 | bad JSON | `-32700` parse error. |
 | unknown method (with id) | `-32601` method not found. |
+| unsupported `_meta` protocol version | `-32602` invalid params. |
 
 Tool-level errors ride back as `isError: true` responses, not JSON-RPC errors —
 JSON-RPC `error` objects are reserved for transport/method faults, matching the
 MCP convention.
+
+### 2026-07-28 (stateless revision)
+
+No `initialize` handshake and no `Mcp-Session-Id`: every request carries its
+context in `_meta` (`io.modelcontextprotocol/protocolVersion` / `clientInfo` /
+`clientCapabilities`), `server/discover` advertises capabilities, and the
+Streamable-HTTP `Mcp-Method` / `Mcp-Name` routing headers are accepted. Tools can
+elicit input via **MRTR** (`registerToolMRTR` + `newInputRequired`) and return
+task handles via the **Tasks** extension (`registerTaskTool`). Requests without
+`_meta` are treated as legacy `2024-11-05` and work unchanged. See
+`examples/mrtr_server.nim`.
 
 ## Transports
 
