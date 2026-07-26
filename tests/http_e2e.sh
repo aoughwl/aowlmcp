@@ -35,6 +35,29 @@ check "wrong path 404" "404" "$NF"
 BAD=$(curl -s "localhost:$PORT/mcp" -d '{bad')
 check "bad json -32700" '"code":-32700' "$BAD"
 
+echo "== 2026-07-28 over HTTP =="
+DISC=$(curl -s "localhost:$PORT/mcp" -H 'Mcp-Method: server/discover' -d '{"jsonrpc":"2.0","id":10,"method":"server/discover"}')
+check "server/discover"        '"protocolVersions":["2026-07-28","2024-11-05"]' "$DISC"
+check "tasks ext advertised"   '"io.modelcontextprotocol/tasks"' "$DISC"
+LST=$(curl -s "localhost:$PORT/mcp" -d '{"jsonrpc":"2.0","id":11,"method":"tools/list"}')
+check "caching ttlMs"          '"ttlMs":60000' "$LST"
+# routing headers accepted (SEP-2243) + _meta protocol version honoured
+V2=$(curl -s "localhost:$PORT/mcp" -H 'Mcp-Method: tools/call' -H 'Mcp-Name: add' \
+  -d '{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"add","arguments":{"a":40,"b":2},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}')
+check "routing headers + _meta" '\"sum\":42' "$V2"
+BADV=$(curl -s "localhost:$PORT/mcp" -d '{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"add","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"1999-01-01"}}}')
+check "bad version -32602"      '"code":-32602' "$BADV"
+# MRTR round-trip over HTTP
+MR1=$(curl -s "localhost:$PORT/mcp" -d '{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"delete_files","arguments":{"count":3}}}')
+check "MRTR inputRequired"      '"resultType":"inputRequired"' "$MR1"
+MR2=$(curl -s "localhost:$PORT/mcp" -d '{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"delete_files","arguments":{"count":3},"inputResponses":{"confirm":true},"requestState":"3"}}')
+check "MRTR completes"          'deleted 3 files' "$MR2"
+# Tasks extension over HTTP
+TK1=$(curl -s "localhost:$PORT/mcp" -d '{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"slow_add","arguments":{"a":40,"b":2}}}')
+check "task handle"             '"status":"completed"' "$TK1"
+TK2=$(curl -s "localhost:$PORT/mcp" -d '{"jsonrpc":"2.0","id":17,"method":"tasks/get","params":{"taskId":"task-1"}}')
+check "tasks/get result"        '\"sum\":42' "$TK2"
+
 echo
 echo "http e2e: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]

@@ -18,6 +18,22 @@ proc add2(args: JsonValue): JsonValue =
   result = newJObject()
   result["sum"] = newJInt(args{"a"}.getInt(0) + args{"b"}.getInt(0))
 
+proc deleteFiles(args, inputResponses, requestState: JsonValue): JsonValue =
+  ## MRTR (2026-07-28): confirm before acting, over HTTP.
+  if inputResponses.kind != jnObject:
+    let confirm = newJObject()
+    confirm["type"] = newJString("elicitation")
+    confirm["message"] = newJString("Delete " & $args{"count"}.getInt(0) & " files?")
+    let schema = newJObject()
+    schema["type"] = newJString("boolean")
+    let requests = newJObject()
+    requests["confirm"] = confirm
+    return newInputRequired(requests, $args{"count"}.getInt(0))
+  result = newJObject()
+  result["message"] = newJString(
+    if inputResponses{"confirm"}.getBool(false): "deleted " & requestState.getStr & " files"
+    else: "cancelled")
+
 var port = 8130
 if paramCount() >= 1:
   try: port = parseInt(paramStr(1))
@@ -28,6 +44,12 @@ srv.registerTool("greet", "Greet someone by name.",
   """{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}""",
   greet)
 srv.registerTool("add", "Add two integers.",
+  """{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"]}""",
+  add2)
+srv.registerToolMRTR("delete_files", "Delete files (asks to confirm first).",
+  """{"type":"object","properties":{"count":{"type":"integer"}},"required":["count"]}""",
+  deleteFiles)
+srv.registerTaskTool("slow_add", "Add two integers, returned as a task.",
   """{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"]}""",
   add2)
 
