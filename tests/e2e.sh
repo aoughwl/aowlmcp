@@ -49,7 +49,7 @@ OUT3=$(printf '%s\n' \
   '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"greet","arguments":{"name":"v2"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}' \
   '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"greet","arguments":{"name":"x"},"_meta":{"io.modelcontextprotocol/protocolVersion":"1999-01-01"}}}' \
   | ./bin/echo_server)
-check "discover lists versions"  '"protocolVersions":["2026-07-28","2024-11-05"]' "$OUT3"
+check "discover lists versions"  '"protocolVersions":["2026-07-28","2025-06-18","2025-03-26","2024-11-05"]' "$OUT3"
 check "discover has extensions"  '"extensions":{}' "$OUT3"
 check "initialize negotiates v2" '"protocolVersion":"2026-07-28"' "$OUT3"
 check "tools/list ttlMs"         '"ttlMs":60000' "$OUT3"

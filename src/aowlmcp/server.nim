@@ -27,10 +27,19 @@ const
     ## Newest MCP revision this server implements (stateless).
   ProtocolVersionLegacy* = "2024-11-05"
     ## Original stateful revision, retained for backwards compatibility.
+  ProtocolVersion2025_03* = "2025-03-26"
+  ProtocolVersion2025_06* = "2025-06-18"
+    ## The intervening stateful revisions. For the surface this server
+    ## implements -- initialize, tools/list, tools/call -- they are wire
+    ## compatible with the legacy handshake, and a client that asks for one
+    ## and is answered "2024-11-05" is entitled to hang up. Echoing the
+    ## version it asked for is both cheaper and more correct than being
+    ## downgraded by a server that would have behaved identically.
   ProtocolVersion* = ProtocolVersionLatest
     ## The version advertised by default (e.g. `server/discover`, `initialize`
     ## when the client does not request a specific one).
-  SupportedProtocolVersions* = [ProtocolVersionLatest, ProtocolVersionLegacy]
+  SupportedProtocolVersions* = [ProtocolVersionLatest, ProtocolVersion2025_06,
+                                ProtocolVersion2025_03, ProtocolVersionLegacy]
 
   # `_meta` keys defined by the 2026-07-28 revision (statelessness SEPs).
   MetaProtocolVersion* = "io.modelcontextprotocol/protocolVersion"
@@ -108,6 +117,14 @@ proc registerTool*(srv: Server; name, description, schemaJson: string;
   srv.tools.add(Tool(name: name, description: description,
                      inputSchema: parseSchema(schemaJson),
                      handler: handler, mrtr: nil))
+
+proc hasTool*(srv: Server; name: string): bool =
+  ## Is `name` already registered? A migrating server asks this before
+  ## advertising a proxied descriptor, so a ported tool is never shadowed by
+  ## the implementation it replaced.
+  for t in srv.tools:
+    if t.name == name: return true
+  result = false
 
 proc registerFallback*(srv: Server; handler: ToolHandlerNamed) =
   ## Serve any tool this server did not register. `tools/list` still reports
