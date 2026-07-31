@@ -53,6 +53,13 @@ type
     ## Receives the `arguments` object of a `tools/call`, returns a structured
     ## result. Return an object containing an `"error"` key to signal failure.
 
+  ToolHandlerNamed* = proc(name: string; args: JsonValue): JsonValue
+    ## A handler that also receives the tool NAME. Registered with
+    ## `registerFallback`, it serves every tool the server did not register
+    ## itself -- which is what a server being migrated tool-by-tool needs: the
+    ## ported tools are real registrations, and everything else is forwarded
+    ## somewhere that still implements it, without the caller seeing a seam.
+
   ToolHandlerMRTR* = proc(args, inputResponses, requestState: JsonValue): JsonValue
     ## Multi-Round-Trip (2026-07-28) handler. In addition to `arguments` it
     ## receives the `inputResponses` map and echoed `requestState` from a follow-up
@@ -76,12 +83,14 @@ type
     name: string
     version: string
     tools: seq[Tool]
+    fallback: ToolHandlerNamed    ## serves tools this server did not register
     tasks: seq[Task]              ## Tasks-extension store (2026-07-28)
     taskSeq: int
 
 proc newServer*(name: string; version = "0.1.0"): Server =
   ## Create an MCP server that will identify itself as `name`/`version`.
-  Server(name: name, version: version, tools: @[], tasks: @[], taskSeq: 0)
+  Server(name: name, version: version, tools: @[], tasks: @[], taskSeq: 0,
+         fallback: nil)
 
 proc parseSchema(schemaJson: string): JsonValue =
   ## Parse a JSON-Schema string; a malformed schema is a programming error, so
@@ -99,6 +108,22 @@ proc registerTool*(srv: Server; name, description, schemaJson: string;
   srv.tools.add(Tool(name: name, description: description,
                      inputSchema: parseSchema(schemaJson),
                      handler: handler, mrtr: nil))
+
+proc registerFallback*(srv: Server; handler: ToolHandlerNamed) =
+  ## Serve any tool this server did not register. `tools/list` still reports
+  ## only the registered tools -- a fallback answers calls, it does not
+  ## advertise; combine it with explicitly registered descriptors (or a proxied
+  ## listing) when the extra tools should be visible.
+  srv.fallback = handler
+
+proc registerProxied*(srv: Server; name, description, schemaJson: string) =
+  ## Advertise a tool in `tools/list` whose CALLS go to the fallback handler.
+  ## This is the other half of a tool-by-tool migration: the descriptor is
+  ## real, so the client sees one coherent tool set, while the implementation
+  ## still lives wherever the fallback forwards to.
+  srv.tools.add(Tool(name: name, description: description,
+                     inputSchema: parseSchema(schemaJson),
+                     handler: nil, mrtr: nil))
 
 proc registerToolMRTR*(srv: Server; name, description, schemaJson: string;
                        handler: ToolHandlerMRTR) =
@@ -254,16 +279,25 @@ proc wrapToolResult(res: JsonValue): JsonValue =
 proc handleToolsCall(srv: Server; id: JsonValue; params: JsonValue): JsonValue =
   let name = params{"name"}.getStr
   let idx = srv.findTool(name)
-  if idx < 0:
-    let e = newJObject()
-    e["error"] = newJString("unknown tool: " & name)
-    return makeResponse(id, wrapToolResult(e))
   var args = params{"arguments"}
   if args.kind != jnObject:
     args = newJObject()
+  if idx < 0:
+    if srv.fallback != nil:
+      return makeResponse(id, wrapToolResult(srv.fallback(name, args)))
+    let e = newJObject()
+    e["error"] = newJString("unknown tool: " & name)
+    return makeResponse(id, wrapToolResult(e))
 
   var res: JsonValue
-  if srv.tools[idx].mrtr != nil:
+  if srv.tools[idx].handler == nil and srv.tools[idx].mrtr == nil:
+    # A proxied descriptor: advertised here, implemented by the fallback.
+    if srv.fallback == nil:
+      let e = newJObject()
+      e["error"] = newJString("no implementation for tool: " & name)
+      return makeResponse(id, wrapToolResult(e))
+    res = srv.fallback(name, args)
+  elif srv.tools[idx].mrtr != nil:
     # 2026-07-28 MRTR tool: hand it the follow-up `inputResponses` + echoed
     # `requestState` (both JNull on the first call).
     res = srv.tools[idx].mrtr(args, params{"inputResponses"}, params{"requestState"})

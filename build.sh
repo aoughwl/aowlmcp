@@ -27,5 +27,8 @@ if [[ -z "${exe:-}" ]]; then
   echo "build.sh: could not locate built $name in nimcache/" >&2
   exit 1
 fi
-cp "$exe" "bin/$name"
+# A server built here may be RUNNING (its binary held open by a live MCP
+# session), and cp into a busy file fails with ETXTBSY. Write beside it and
+# rename: the running process keeps the old inode, the next start gets this.
+cp "$exe" "bin/.$name.new" && mv -f "bin/.$name.new" "bin/$name"
 echo "built bin/$name"
