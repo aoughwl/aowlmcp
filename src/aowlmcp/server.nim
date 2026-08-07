@@ -282,7 +282,9 @@ proc findTask(srv: Server; id: string): int =
 
 proc wrapToolResult(res: JsonValue): JsonValue =
   ## Encode a handler's structured result as an MCP tool-result payload.
-  let isError = res.kind == jnObject and res.hasKey("error")
+  # kindOf, not .kind: a handler may return nil, and aowljson now hands back
+  # nil for an absent key rather than a JNull, so .kind can fault.
+  let isError = res.kindOf == jnObject and res.hasKey("error")
   let block0 = newJObject()
   block0["type"] = newJString("text")
   block0["text"] = newJString($res)
@@ -297,7 +299,10 @@ proc handleToolsCall(srv: Server; id: JsonValue; params: JsonValue): JsonValue =
   let name = params{"name"}.getStr
   let idx = srv.findTool(name)
   var args = params{"arguments"}
-  if args.kind != jnObject:
+  # `arguments` is optional, and an absent key is nil (not a JNull) since
+  # aowljson made `!= nil` an honest presence test -- so this must not touch
+  # .kind directly.
+  if args.kindOf != jnObject:
     args = newJObject()
   if idx < 0:
     if srv.fallback != nil:
@@ -433,7 +438,7 @@ proc handleMessage*(srv: Server; msg: string): string =
   let req = parseJson(msg, err)
   if err.len > 0:
     return $makeError(newJNull(), -32700, "parse error")
-  if req.kind == jnArray:
+  if req.kindOf == jnArray:
     let arr = newJArray()
     for sub in req:
       let r = dispatch(srv, sub)
