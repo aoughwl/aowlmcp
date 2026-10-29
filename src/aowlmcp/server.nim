@@ -20,7 +20,7 @@ when defined(nimony):
   {.feature: "lenientnils".}
 
 import std/syncio
-import aowljson
+import jsonref
 
 const
   ProtocolVersionLatest* = "2026-07-28"
@@ -282,7 +282,7 @@ proc findTask(srv: Server; id: string): int =
 
 proc wrapToolResult(res: JsonValue): JsonValue =
   ## Encode a handler's structured result as an MCP tool-result payload.
-  # kindOf, not .kind: a handler may return nil, and aowljson now hands back
+  # kindOf, not .kind: a handler may return nil, and jsonref now hands back
   # nil for an absent key rather than a JNull, so .kind can fault.
   let isError = res.kindOf == jnObject and res.hasKey("error")
   let block0 = newJObject()
@@ -300,7 +300,7 @@ proc handleToolsCall(srv: Server; id: JsonValue; params: JsonValue): JsonValue =
   let idx = srv.findTool(name)
   var args = params{"arguments"}
   # `arguments` is optional, and an absent key is nil (not a JNull) since
-  # aowljson made `!= nil` an honest presence test -- so this must not touch
+  # jsonref made `!= nil` an honest presence test -- so this must not touch
   # .kind directly.
   if args.kindOf != jnObject:
     args = newJObject()

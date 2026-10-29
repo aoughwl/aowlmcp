@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVE="$HOME/aoughwl-serve"
 NIMONY="${NIMONY:-$HOME/nimony/bin/nimony}"
-AOWLJSON="${AOWLJSON:-$HOME/aowljson/src}"
+JSONREF="${JSONREF:-$HOME/jsonref/src}"
 NC="$(mktemp -d)"; PORT="${PORT:-8480}"
 CERT="$NC/cert.pem"; KEY="$NC/key.pem"
 
@@ -24,7 +24,7 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
   -addext "subjectAltName=DNS:localhost" 2>/dev/null
 
 echo "== build aowlmcp H3 server =="
-"$NIMONY" c --base:"$ROOT" -d:nimony --nimcache:"$NC" --path:"$AOWLJSON" $NET_PATHS \
+"$NIMONY" c --base:"$ROOT" -d:nimony --nimcache:"$NC" --path:"$JSONREF" $NET_PATHS \
   "$ROOT/examples/http3_server.nim" 2>&1 | grep -iE 'Error:|FAILURE' && exit 1 || true
 SBIN="$(find "$NC" -type f -name http3_server -executable | head -1)"
 

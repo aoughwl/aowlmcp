@@ -17,8 +17,8 @@
 ## srv.run()
 ## ```
 
-import aowljson
+import jsonref
 import aowlmcp/server
 
-export aowljson
+export jsonref
 export server

@@ -146,7 +146,7 @@ appear in Claude Code with no manual build step.
 ## Layout
 
 ```
-src/aowlmcp.nim          umbrella module (import this); re-exports aowljson
+src/aowlmcp.nim          umbrella module (import this); re-exports jsonref
 src/aowlmcp/server.nim   Server: registry, JSON-RPC dispatch, handleMessage, stdio run
 src/aowlmcp/http.nim     opt-in HTTP (Streamable-HTTP) transport over the net stack
 examples/                echo_server, http_server, nimtools_server
